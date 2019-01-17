@@ -7,9 +7,11 @@ local c = regentlib.c
 local cstring = terralib.includec("string.h")
 local cmath = terralib.includec("math.h")
 
-local sqrt = regentlib.sqrt(double)
-local pow = regentlib.pow(double)
-local erf = regentlib.erf(double)
+local M_PI = cmath.M_PI
+local sqrt = cmath.sqrt
+local pow = cmath.pow
+local exp = cmath.exp
+local erf = cmath.erf
 
 MAX_BASIS_SIZE = 10
 MAX_NUM_ATOMS = 1000
@@ -38,7 +40,7 @@ fspace Primitive {
 fspace Pairlist {
   -- see Boys formula from 2008 TC paper for details on these attributes
   Eij       :  double; -- ei + ej
-  Kij       :  double; -- normalized exponential 
+  Kij       :  double; -- normalized exponential
   Rijx      :  double; -- normalized distance
   Rijy      :  double; -- normalized distance
   Rijz      :  double; -- normalized distance
@@ -84,7 +86,7 @@ end
 terra read_xyz(f : &c.FILE, xyz : &double)
   var atom_type : int8[512]
   c.fscanf(f, "%s%lf%lf%lf\n", &atom_type, &xyz[0], &xyz[1], &xyz[2])
-  if not (cstring.strcmp(atom_type, "H") == 0) then return false 
+  if not (cstring.strcmp(atom_type, "H") == 0) then return false
   else return true end
 end
 
@@ -95,29 +97,29 @@ terra read_basis_file(f       : &c.FILE,
   var mobj1 : int8[512]
   var mobj2 : int8[512]
   c.fscanf(f,"%s%s%*[^\n]\n", &mobj1, &mobj2)
-  if (cstring.strcmp(mobj1, "****") == 0) or (cstring.strcmp(mobj1, "He") == 0) then  
+  if (cstring.strcmp(mobj1, "****") == 0) or (cstring.strcmp(mobj1, "He") == 0) then
     return true
   elseif (cstring.strcmp(&mobj1[0], "H") == 0) then
-    return false 
+    return false
   elseif (cstring.strcmp(&mobj1[0], "S") == 0) then
     var shell_done = false
     AOidx[counter[1]] = counter[0]
     counter[1] = counter[1] + 1
     while not shell_done do
-      var mobj3 : double[1] 
+      var mobj3 : double[1]
       var mobj4 : double[1]
       mobj3[0] = 0
       mobj4[0] = 0
       var shell = c.fscanf(f, "%lf%lf\n", &mobj3, &mobj4)
-      
-      if not(shell == 2) then shell_done = true 
+
+      if not(shell == 2) then shell_done = true
       else
         EW[counter[0]] = double(mobj3[0])
         EW[counter[0]+1] = double(mobj4[0])
         counter[0] = counter[0] + 2
       end
     end
-    return false 
+    return false
   else
     c.printf("ERROR: Error reading basis file")
     return true
@@ -126,7 +128,7 @@ end
 
 
 task factorize(parallelism : int) : int2d
-  var limit = [int](cmath.sqrt([double](parallelism)))
+  var limit = [int](sqrt([double](parallelism)))
   var size_x = 1
   var size_y = parallelism
   for i = 1, limit + 1 do
@@ -142,9 +144,9 @@ end
 
 
 task write_output(r_eri     :  region(ispace(int2d), SIntegral),
-                  filename  :  int8[512], 
+                  filename  :  int8[512],
                   M         :  int)
-where 
+where
   reads(r_eri.s_int)
 do
   var f = c.fopen(filename, "w")
@@ -154,7 +156,7 @@ do
     end
   end
   c.fclose(f)
-  
+
 
 end
 
@@ -169,7 +171,7 @@ task initialize_system(r_atoms     : region(ispace(int1d), Atom),
                        geom_file   : int8[512],
                        basis_file  : int8[512])
 
-where 
+where
   reads writes(r_atoms, r_EW, r_AOidx)
 do
   var ts_start = c.legion_get_current_time_in_micros()
@@ -213,7 +215,7 @@ do
   for i in r_AOidx.ispace do
     r_AOidx[i].aoidx = AOidx[int(i)]
   end
-  
+
 
   var ts_stop = c.legion_get_current_time_in_micros()
   c.printf("System initialization took %.4f sec\n", (ts_stop - ts_start) * 1e-6)
@@ -229,9 +231,9 @@ task initialize_prims(r_atoms      : region(ispace(int1d), Atom),
                       num_prims    : int,
                       num_AO       : int,
                       num_atoms    : uint64)
-where 
+where
   reads (r_atoms, r_EW, r_AOidx),
-  reads writes (r_prims) 
+  reads writes (r_prims)
 do
   var ts_start = c.legion_get_current_time_in_micros()
 
@@ -240,23 +242,23 @@ do
   var C : double[MAX_NUM_PRIMS]
   var count = 0
   -- NOTE: this is only for L = 0 case (angular momentum = 0 for s orbitals)
-  var pi32 = cmath.pow(cmath.M_PI, 1.5)
+  var pi32 = pow(M_PI, 1.5)
 
   -- loop over all atomic orbitals
   for i = 0, num_AO do
     -- loop over primitives within AO to normalize prim coeffs
-    for j = r_AOidx[i].aoidx/2, r_AOidx[i+1].aoidx/2 do 
-      C[j] = r_EW[2*j+1].ew * c.sqrt(c.pow(2.0 * r_EW[2*j].ew, 1.5) / pi32)
+    for j = r_AOidx[i].aoidx/2, r_AOidx[i+1].aoidx/2 do
+      C[j] = r_EW[2*j+1].ew * sqrt(pow(2.0 * r_EW[2*j].ew, 1.5) / pi32)
     end
     -- normalize for overlap of one basis function with another (pair) -- unnecessary for s?
     var V = 0.0
-    for j1 = r_AOidx[i].aoidx/2, r_AOidx[i+1].aoidx/2 do 
-      for j2 = r_AOidx[i].aoidx/2, r_AOidx[i+1].aoidx/2 do 
-        V += C[j1] * C[j2] * cmath.pow(r_EW[2*j1].ew + r_EW[2*j2].ew, -1.5) * pi32
+    for j1 = r_AOidx[i].aoidx/2, r_AOidx[i+1].aoidx/2 do
+      for j2 = r_AOidx[i].aoidx/2, r_AOidx[i+1].aoidx/2 do
+        V += C[j1] * C[j2] * pow(r_EW[2*j1].ew + r_EW[2*j2].ew, -1.5) * pi32
       end
     end
-    V = cmath.pow(V, -1.0/2.0) -- V just ends up being 1.0
-    for j = r_AOidx[i].aoidx/2, r_AOidx[i+1].aoidx/2 do 
+    V = pow(V, -1.0/2.0) -- V just ends up being 1.0
+    for j = r_AOidx[i].aoidx/2, r_AOidx[i+1].aoidx/2 do
       C[j] *= V
     end
   end
@@ -265,15 +267,15 @@ do
 
   var basis_count = 0
   var atom_count = 0
-  
+
   -- loop through atoms and populate prims array
   var geoms : double[MAX_NUM_PRIMS * 3]
   var prim_count = 0
   for atom in r_atoms do
-    for i = 0, int(num_prims) do 
-      geoms[prim_count] = atom.x 
-      geoms[prim_count + 1] = atom.y 
-      geoms[prim_count + 2] = atom.z 
+    for i = 0, int(num_prims) do
+      geoms[prim_count] = atom.x
+      geoms[prim_count + 1] = atom.y
+      geoms[prim_count + 2] = atom.z
       prim_count = prim_count + 3
     end
   end
@@ -302,14 +304,14 @@ do
   var idx = 0
   while ao_id < num_AO * num_atoms do
     for i = 0, num_AO do
-      for j = r_AOidx[i].aoidx/2, r_AOidx[i+1].aoidx/2 do 
+      for j = r_AOidx[i].aoidx/2, r_AOidx[i+1].aoidx/2 do
         ao_map[idx] = ao_id
         idx += 1
       end
       ao_id += 1
     end
   end
-  
+
   for i in r_prims.ispace do
     r_prims[i].AOid = ao_map[int(i)]
   end
@@ -323,14 +325,14 @@ end
 task compute_pairlists(r_prims      : region(ispace(int1d), Primitive),
                        r_pairlists  : region(ispace(int1d), Pairlist),
                        N            : int)
-where 
-  reads (r_prims), 
+where
+  reads (r_prims),
   reads writes (r_pairlists)
 do
   var ts_start = c.legion_get_current_time_in_micros()
 
   -- loop over AO, and make pairs within each AO
-  -- just add to pairlist region, include AOid, then partition later 
+  -- just add to pairlist region, include AOid, then partition later
   var p_AO = partition(r_prims.AOid, ispace(int1d, N))
 
   var count = 0
@@ -352,13 +354,13 @@ do
             var y2 = r_prims[i2].y
             var z2 = r_prims[i2].z
             -- Euclidian distance squared
-            var dist = cmath.pow(x2-x1, 2.0) + cmath.pow(y2-y1, 2.0) + cmath.pow(z2-z1, 2.0) 
-            var exp = cmath.exp(-e1*e2/(e1 + e2) * dist)
-            var einv = 1.0/(e1 + e2) 
+            var dist = pow(x2-x1, 2.0) + pow(y2-y1, 2.0) + pow(z2-z1, 2.0)
+            var exp = exp(-e1*e2/(e1 + e2) * dist)
+            var einv = 1.0/(e1 + e2)
             r_pairlists[count].Eij = e1 + e2
-            --r_pairlists[count].Kij = c1*c2 * einv * exp   -- this was part of the error  
-            r_pairlists[count].Kij = c1 * c2 * exp  
-            r_pairlists[count].Rijx = einv * (e1*x1 + e2*x2)  
+            --r_pairlists[count].Kij = c1*c2 * einv * exp   -- this was part of the error
+            r_pairlists[count].Kij = c1 * c2 * exp
+            r_pairlists[count].Rijx = einv * (e1*x1 + e2*x2)
             r_pairlists[count].Rijy = einv * (e1*y1 + e2*y2)
             r_pairlists[count].Rijz = einv * (e1*z1 + e2*z2)
             r_pairlists[count].AOpair_id = pair_id
@@ -369,7 +371,7 @@ do
       end
     end
   end
-  
+
   var ts_stop = c.legion_get_current_time_in_micros()
   c.printf("Computing pairlists took %.4f sec\n", (ts_stop - ts_start) * 1e-6)
 
@@ -382,13 +384,13 @@ task compute_integrals(r_eri          : region(ispace(int2d), SIntegral),
                        ry_pairlists   : region(ispace(int1d), Pairlist),
                        rx_AOpairlists : region(ispace(int1d), AOpairlist),
                        ry_AOpairlists : region(ispace(int1d), AOpairlist))
-where 
+where
   reads (rx_pairlists, ry_pairlists, rx_AOpairlists, ry_AOpairlists),
   writes (r_eri.s_int)
 do
-  
-  var pi12 = c.sqrt(c.M_PI)
-  var pi52 = c.pow(c.M_PI, 5.0/2.0)
+
+  var pi12 = sqrt(M_PI)
+  var pi52 = pow(M_PI, 5.0/2.0)
 
   for e in r_eri do
     var AO1 = rx_AOpairlists[e.x]
@@ -411,12 +413,12 @@ do
         var t = sqrt(E1 * E2/(E1 + E2) * dist)
         var Einv = 1.0/(E1 * E2 * sqrt(E1 + E2))
         if t < 1.0e-10 then -- erf(sqrt(0))/sqrt(0) = 1
-          integral += 2.0 * pi52 * Einv * K1 * K2 
+          integral += 2.0 * pi52 * Einv * K1 * K2
         else
-          integral += 2.0 * pi52 * Einv * K1 * K2 * (pi12/2.0) * (1.0/t) * erf(t) 
+          integral += 2.0 * pi52 * Einv * K1 * K2 * (pi12/2.0) * (1.0/t) * erf(t)
         end
       end
-    end 
+    end
     e.s_int = integral
   end
 
@@ -425,8 +427,8 @@ end
 
 task check_normalization(r_prims  : region(ispace(int1d), Primitive),
                          N        : int)
-where 
-  reads (r_prims) 
+where
+  reads (r_prims)
 do
   var p_AO = partition(r_prims.AOid, ispace(int1d, N))
 
@@ -441,7 +443,7 @@ do
         var c1 = r_prims[i1].c
         var c2 = r_prims[i2].c
         var oe = 1.0/(e1 + e2)
-        overlap += c1 * c2 * c.pow(cmath.M_PI * oe, 1.5)
+        overlap += c1 * c2 * pow(M_PI * oe, 1.5)
       end
     end
     c.printf("AO : %d    overlap : %.6f\n", AO, overlap)
@@ -456,7 +458,7 @@ end
 ------------------------
 ---- TOP LEVEL TASK ----
 ------------------------
- 
+
 task toplevel()
   var config : ERIConfig
   config:initialize_from_command()
@@ -491,7 +493,7 @@ task toplevel()
   var num_prims = config.num_atoms*(EW_size/2)
   var r_prims = region(ispace(int1d, num_prims), Primitive)
 
-  -- load data into r_prims and normalize gaussian coefficients 
+  -- load data into r_prims and normalize gaussian coefficients
   initialize_prims(r_atoms, r_prims, r_EW, r_AOidx, EW_size/2, num_AO_per_atom, config.num_atoms)
 
   -- Create a region of pairlists
@@ -508,13 +510,13 @@ task toplevel()
       end
     end
   end
-  var r_pairlists = region(ispace(int1d, num_pairs), Pairlist) 
+  var r_pairlists = region(ispace(int1d, num_pairs), Pairlist)
 
   -- Compute pairlists (simple compared to 2ERI, no need to parallelize)
   compute_pairlists(r_prims, r_pairlists, N)
 
   -- create CSR-like array in AOpairlist to index into r_pairlists for atomic orbitals
-  var r_AOpairlists = region(ispace(int1d, M), AOpairlist) 
+  var r_AOpairlists = region(ispace(int1d, M), AOpairlist)
   var curr_AO : int1d = 0
   var count = 0
   r_AOpairlists[0].start_idx = curr_AO
@@ -535,11 +537,11 @@ task toplevel()
 
   -- block r_eri and r_pairlists according to config.parallelism
   var block2d = factorize(config.parallelism)
-  
+
   -- partition r_eri and r_AOpairlist
   var p_eri = partition(equal, r_eri, ispace(int2d, block2d))
-  var px_AOpairlists = partition(equal, r_AOpairlists, ispace(int1d, block2d.x)) 
-  var py_AOpairlists = partition(equal, r_AOpairlists, ispace(int1d, block2d.y)) 
+  var px_AOpairlists = partition(equal, r_AOpairlists, ispace(int1d, block2d.x))
+  var py_AOpairlists = partition(equal, r_AOpairlists, ispace(int1d, block2d.y))
 
   -- label r_pairlist for parallelizing
   for color in px_AOpairlists.colors do
@@ -548,7 +550,7 @@ task toplevel()
       for i = pair.start_idx, pair.end_idx do
         r_pairlists[i].xpart_id = color
       end
-    end 
+    end
   end
   for color in py_AOpairlists.colors do
     var chunk = py_AOpairlists[color]
@@ -556,13 +558,13 @@ task toplevel()
       for i = pair.start_idx, pair.end_idx do
         r_pairlists[i].ypart_id = color
       end
-    end 
+    end
   end
 
   -- now we can partition the actual pairlist region based on label
   var px_pairlists = partition(r_pairlists.xpart_id, ispace(int1d, block2d.x))
   var py_pairlists = partition(r_pairlists.ypart_id, ispace(int1d, block2d.y))
-  
+
 
 
   -- ERI Calculation ---------------
@@ -572,9 +574,9 @@ task toplevel()
 
   -- Loop over pairlists to compute integral
   for color in p_eri.colors do
-    compute_integrals(p_eri[color], 
-                      px_pairlists[color.x], 
-                      py_pairlists[color.y],   
+    compute_integrals(p_eri[color],
+                      px_pairlists[color.x],
+                      py_pairlists[color.y],
                       px_AOpairlists[color.x],
                       py_AOpairlists[color.y])
   end
