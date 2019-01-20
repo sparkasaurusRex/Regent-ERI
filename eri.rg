@@ -67,6 +67,12 @@ fspace AOidx_data {
   aoidx    :   int;
 }
 
+fspace PrimitiveIntegral {
+  prim_bra_idx  : int1d; -- TODO: Should maybe be pointers
+  prim_ket_idx  : int1d;
+  sintegral_idx : int2d;
+}
+
 ---------------------------
 ------ UTILITY TASKS ------
 ---------------------------
@@ -377,53 +383,38 @@ do
 
 end
 
-
 __demand(__cuda, __leaf)
-task compute_integrals(r_eri          : region(ispace(int2d), SIntegral),
-                       rx_pairlists   : region(ispace(int1d), Pairlist),
-                       ry_pairlists   : region(ispace(int1d), Pairlist),
-                       rx_AOpairlists : region(ispace(int1d), AOpairlist),
-                       ry_AOpairlists : region(ispace(int1d), AOpairlist))
+task compute_primitive_integrals(r_prim_int  : region(ispace(ptr), PrimitiveIntegral),
+                                 r_pairlists : region(ispace(int1d), Pairlist),
+                                 r_eri       : region(ispace(int2d), SIntegral))
 where
-  reads (rx_pairlists, ry_pairlists, rx_AOpairlists, ry_AOpairlists),
-  writes (r_eri.s_int)
+  reads(r_prim_int, r_pairlists), reduces +(r_eri.s_int)
 do
-
   var pi12 = sqrt(M_PI)
   var pi52 = pow(M_PI, 5.0/2.0)
-
-  for e in r_eri do
-    var AO1 = rx_AOpairlists[e.x]
-    var AO2 = ry_AOpairlists[e.y]
-
-    var integral = 0.0
-    for i1 = AO1.start_idx, AO1.end_idx do
-      var x1 = rx_pairlists[i1].Rijx
-      var y1 = rx_pairlists[i1].Rijy
-      var z1 = rx_pairlists[i1].Rijz
-      var E1 = rx_pairlists[i1].Eij
-      var K1 = rx_pairlists[i1].Kij
-      for i2 = AO2.start_idx, AO2.end_idx do
-        var x2 = ry_pairlists[i2].Rijx
-        var y2 = ry_pairlists[i2].Rijy
-        var z2 = ry_pairlists[i2].Rijz
-        var E2 = ry_pairlists[i2].Eij
-        var K2 = ry_pairlists[i2].Kij
-        var dist = pow(x2 - x1, 2.0) + pow(y2 - y1, 2.0) + pow(z2 - z1, 2.0)
-        var t = sqrt(E1 * E2/(E1 + E2) * dist)
-        var Einv = 1.0/(E1 * E2 * sqrt(E1 + E2))
-        if t < 1.0e-10 then -- erf(sqrt(0))/sqrt(0) = 1
-          integral += 2.0 * pi52 * Einv * K1 * K2
-        else
-          integral += 2.0 * pi52 * Einv * K1 * K2 * (pi12/2.0) * (1.0/t) * erf(t)
-        end
-      end
+  for prim_int in r_prim_int do
+    var prim_bra = r_pairlists[prim_int.prim_bra_idx]
+    var prim_ket = r_pairlists[prim_int.prim_ket_idx]
+    var x1 = prim_bra.Rijx
+    var y1 = prim_bra.Rijy
+    var z1 = prim_bra.Rijz
+    var E1 = prim_bra.Eij
+    var K1 = prim_bra.Kij
+    var x2 = prim_ket.Rijx
+    var y2 = prim_ket.Rijy
+    var z2 = prim_ket.Rijz
+    var E2 = prim_ket.Eij
+    var K2 = prim_ket.Kij
+    var dist = pow(x2 - x1, 2.0) + pow(y2 - y1, 2.0) + pow(z2 - z1, 2.0)
+    var t = sqrt(E1 * E2/(E1 + E2) * dist)
+    var Einv = 1.0/(E1 * E2 * sqrt(E1 + E2))
+    if t < 1.0e-10 then -- erf(sqrt(0))/sqrt(0) = 1
+      r_eri[prim_int.sintegral_idx].s_int += 2.0 * pi52 * Einv * K1 * K2
+    else
+      r_eri[prim_int.sintegral_idx].s_int += 2.0 * pi52 * Einv * K1 * K2 * (pi12/2.0) * (1.0/t) * erf(t)
     end
-    e.s_int = integral
   end
-
 end
-
 
 task check_normalization(r_prims  : region(ispace(int1d), Primitive),
                          N        : int)
@@ -535,50 +526,49 @@ task toplevel()
   -- Create a region to store computed two-electron repulsion integral
   var r_eri = region(ispace(int2d, {M, M}), SIntegral)
 
-  -- block r_eri and r_pairlists according to config.parallelism
-  var block2d = factorize(config.parallelism)
-
-  -- partition r_eri and r_AOpairlist
-  var p_eri = partition(equal, r_eri, ispace(int2d, block2d))
-  var px_AOpairlists = partition(equal, r_AOpairlists, ispace(int1d, block2d.x))
-  var py_AOpairlists = partition(equal, r_AOpairlists, ispace(int1d, block2d.y))
-
-  -- label r_pairlist for parallelizing
-  for color in px_AOpairlists.colors do
-    var chunk = px_AOpairlists[color]
-    for pair in chunk do
-      for i = pair.start_idx, pair.end_idx do
-        r_pairlists[i].xpart_id = color
+  -- Create region for primitive integrals
+  -- TODO: I'm sure this could be simplified
+  var num_prim_ints = 0
+  for e in r_eri do
+    var AO1 = r_AOpairlists[e.x]
+    var AO2 = r_AOpairlists[e.y]
+    for i1 = AO1.start_idx, AO1.end_idx do
+      for i2 = AO2.start_idx, AO2.end_idx do
+        num_prim_ints = num_prim_ints + 1 -- TODO: Can I compute this directly?
       end
     end
   end
-  for color in py_AOpairlists.colors do
-    var chunk = py_AOpairlists[color]
-    for pair in chunk do
-      for i = pair.start_idx, pair.end_idx do
-        r_pairlists[i].ypart_id = color
+  var r_prim_ints = region(ispace(ptr, num_prim_ints), PrimitiveIntegral)
+  num_prim_ints = 0
+  for e in r_eri do
+    var AO1 = r_AOpairlists[e.x]
+    var AO2 = r_AOpairlists[e.y]
+    for i1 = AO1.start_idx, AO1.end_idx do
+      for i2 = AO2.start_idx, AO2.end_idx do
+        r_prim_ints[num_prim_ints].prim_bra_idx = i1
+        r_prim_ints[num_prim_ints].prim_ket_idx = i2
+        r_prim_ints[num_prim_ints].sintegral_idx = e
+        num_prim_ints = num_prim_ints + 1
       end
     end
   end
 
-  -- now we can partition the actual pairlist region based on label
-  var px_pairlists = partition(r_pairlists.xpart_id, ispace(int1d, block2d.x))
-  var py_pairlists = partition(r_pairlists.ypart_id, ispace(int1d, block2d.y))
-
-
+  var coloring = ispace(ptr, config.parallelism)
+  var p_prim_ints = partition(equal, r_prim_ints, coloring)
+  var p_pairlists = image(r_pairlists, p_prim_ints, r_prim_ints.prim_bra_idx)
+                    & image(r_pairlists, p_prim_ints, r_prim_ints.prim_ket_idx)
+  var p_eri = image(r_eri, p_prim_ints, r_prim_ints.sintegral_idx)
+  fill(r_eri, {0.0})
 
   -- ERI Calculation ---------------
 
   __fence(__execution, __block) -- block for timing
   var ts_start = c.legion_get_current_time_in_micros()
 
-  -- Loop over pairlists to compute integral
-  for color in p_eri.colors do
-    compute_integrals(p_eri[color],
-                      px_pairlists[color.x],
-                      py_pairlists[color.y],
-                      px_AOpairlists[color.x],
-                      py_AOpairlists[color.y])
+  for color in coloring do
+   compute_primitive_integrals(p_prim_ints[color],
+                               p_pairlists[color],
+                               p_eri[color])
   end
 
   __fence(__execution, __block) -- block for timing
